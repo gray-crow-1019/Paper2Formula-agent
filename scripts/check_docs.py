@@ -1,27 +1,48 @@
-"""Validate local Markdown links and provenance in the authored demo."""
+"""Validate maintained Markdown and, when present, the authored demo."""
 import json
+import os
 import re
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+SKIP_DIRS = {".git", "node_modules", "data", "dist", "build", ".next", ".pytest_cache",
+             "__pycache__", ".venv", ".conda", "coverage", "uploads", "artifacts"}
+OPTIONAL_EXAMPLES = {ROOT / "examples/result.json", ROOT / "examples/report.md"}
+
+
+def markdown_files():
+    for directory, children, files in os.walk(ROOT):
+        children[:] = [name for name in children if name not in SKIP_DIRS]
+        for name in files:
+            if name.endswith(".md"):
+                yield Path(directory) / name
 
 
 def main():
     failures = []
-    for file in ROOT.rglob("*.md"):
-        if ".git" in file.parts:
-            continue
+    for file in markdown_files():
         body = file.read_text(encoding="utf-8")
         for target in re.findall(r"\]\(([^)]+)\)", body):
-            if "://" in target or target.startswith("#"):
+            if urlsplit(target).scheme or target.startswith("#"):
                 continue
-            path = target.split("#", 1)[0]
-            if not (file.parent / path).is_file():
+            path = unquote(target.split("#", 1)[0].split("?", 1)[0]).strip("<>")
+            linked = (file.parent / path).resolve()
+            # Hand-authored examples may be removed by the repository owner.
+            if linked in OPTIONAL_EXAMPLES and not linked.exists():
+                continue
+            if not linked.exists():
                 failures.append(f"{file.relative_to(ROOT)}: missing {target}")
         if body.count("```") % 2:
             failures.append(f"{file.name}: unclosed code fence")
 
-    data = json.loads((ROOT / "examples/result.json").read_text(encoding="utf-8"))
+    result_file = ROOT / "examples/result.json"
+    if not result_file.exists():
+        if failures:
+            raise SystemExit("\n".join(failures))
+        print("PASS: local documentation links and code fences (optional authored demo absent)")
+        return
+    data = json.loads(result_file.read_text(encoding="utf-8"))
     anchors = {a["id"]: a for a in data["anchors"]}
     if len(anchors) != len(data["anchors"]):
         failures.append("duplicate anchor IDs")
@@ -48,10 +69,12 @@ def main():
                 visit(child)
 
     visit(data)
-    report = (ROOT / "examples/report.md").read_text(encoding="utf-8")
-    for item in data["equations"] + data["review_items"]:
-        if item["id"] not in report:
-            failures.append(f"report missing {item['id']}")
+    report_file = ROOT / "examples/report.md"
+    if report_file.exists():
+        report = report_file.read_text(encoding="utf-8")
+        for item in data["equations"] + data["review_items"]:
+            if item["id"] not in report:
+                failures.append(f"report missing {item['id']}")
     if failures:
         raise SystemExit("\n".join(failures))
     print("PASS: local documentation links, code fences, demo coordinates and evidence references")
